@@ -12,6 +12,7 @@ class Memcache
     public $is_persistent = false;
     public $use_compression = false;
     public $expiry = 0;
+    public $queue_name;
 
     public function __construct($options=array())
     {
@@ -27,6 +28,10 @@ class Memcache
         }
         if (!empty($options['expiry']) && is_numeric($options['expiry'])) {
             $this->expiry = $options['expiry'];
+        }
+        // Note: queue_name must be set in order to get FifoQueue behavior.
+        if (!empty($options['queue']) && is_string($options['queue'])) {
+            $this->queue_name = $options['queue'];
         }
     }
 
@@ -78,19 +83,18 @@ class Memcache
         }
         $this->beforeAdd();
         if (is_array($expiry)) {
-            // FIXME: Silently swallow incompatible $properties argument.
+            // FIXME: Silently swallows incompatible $properties argument.
             $expiry = null;
         }
         if (empty($expiry)) {
             $expiry = $this->expiry;
         }
-        $status = $this->getConnection()->replace($key, json_encode($data), $this->use_compression, $expiry);
-        if ($status == false) {
-            $status = $this->getConnection()->set($key, json_encode($data), $this->use_compression, $expiry);
+        if ($this->queue_name) {
+            $contents = $this->get_bucket_contents();
+            $contents[$key] = true;
+            $this->set_bucket_contents($contents);
         }
-        if (!$status) {
-            throw new BackendException("Unable to save data.");
-        }
+        $this->replace_or_set($key, $data, $expiry);
     }
 
     /**
@@ -110,6 +114,43 @@ class Memcache
         $this->getConnection()->delete($key);
         $this->last_job_id = $key;
 
+        if ($this->queue_name) {
+            $contents = $this->get_bucket_contents();
+            unset($contents[$key]);
+            $this->set_bucket_contents($contents);
+        }
+
         return true;
+    }
+
+    protected function bucket_key() {
+        return $this->queue_name . ':contents';
+    }
+
+    // FIXME: Do we want to make this part of the API?
+    public function get_bucket_contents() {
+        $contents = $this->getConnection()->get($this->bucket_key());
+        if ($contents) {
+            $contents = json_decode($contents, true);
+        } else {
+            $contents = array();
+        }
+        return $contents;
+    }
+
+    public function set_bucket_contents($contents) {
+        $this->replace_or_set($this->bucket_key(), $contents, 60 * 60 * 24 * 30);
+    }
+
+    protected function replace_or_set($key, $data, $expiry) {
+        $encoded = json_encode($data);
+
+        $status = $this->getConnection()->replace($key, $encoded, $this->use_compression, $expiry);
+        if ($status !== true) {
+            $status = $this->getConnection()->set($key, $encoded, $this->use_compression, $expiry);
+        }
+        if ($status !== true) {
+            throw new BackendException("Unable to save data.");
+        }
     }
 }

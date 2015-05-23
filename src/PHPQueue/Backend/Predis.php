@@ -6,7 +6,19 @@ use PHPQueue\Interfaces\KeyValueStore;
 use PHPQueue\Interfaces\FifoQueueStore;
 
 /**
- * NOTE: The FIFO index is not usable as a key-value selector in this backend.
+ * Wraps several styles of redis use:
+ *     - If constructed with a "score_key" option, the data will be accessible
+ *       as a key-value store, and will also provide pop and push using
+ *       $data[$score_key] as the FIFO ordering.  If the score value is a
+ *       timestamp, for example, then the queue will have real-world FIFO
+ *       behavior over time, even if the data comes in out of order, we will
+ *       always pop the true oldest record.
+ *       If you wish to push to this type of store, you'll also need to provide
+ *       the "correlation_key" option, so the random-access key can be
+ *       extracted from data.
+ *     - Pushing scalar data will store it as a queue under queue_name.
+ *     - Setting scalar data will store it under the key.
+ *     - If data is an array, setting will store it as a hash, under the key.
  */
 class Predis
     extends Base
@@ -21,6 +33,8 @@ class Predis
     public $servers;
     public $redis_options = array();
     public $queue_name;
+    public $score_key;
+    public $correlation_key;
 
     public function __construct($options=array())
     {
@@ -34,11 +48,17 @@ class Predis
         if (!empty($options['queue'])) {
             $this->queue_name = $options['queue'];
         }
+        if (!empty($options['score_key'])) {
+            $this->score_key = $options['score_key'];
+        }
+        if (!empty($options['correlation_key'])) {
+            $this->correlation_key = $options['correlation_key'];
+        }
     }
 
     public function connect()
     {
-        if (empty($this->servers)) {
+        if (!$this->servers) {
             throw new BackendException("No servers specified");
         }
         $this->connection = new \Predis\Client($this->servers, $this->redis_options);
@@ -47,7 +67,7 @@ class Predis
     /** @deprecated */
     public function add($data=array())
     {
-        if (empty($data)) {
+        if (!$data) {
             throw new BackendException("No data.");
         }
         $this->push($data);
@@ -61,9 +81,23 @@ class Predis
             throw new BackendException("No queue specified.");
         }
         $encoded_data = json_encode($data);
-        // Note that we're ignoring the "new length" return value, cos I don't
-        // see how to make it useful.
-        $this->getConnection()->rpush($this->queue_name, $encoded_data);
+        if ($this->score_key) {
+            if (!$this->correlation_key) {
+                throw new BackendException("Cannot push to zset without a correlation key.");
+            }
+            $key = $data[$this->correlation_key];
+            if (!$key) {
+                throw new BackendException("Cannot push to zset without correlation data.");
+            }
+            $status = $this->addToSortedSet($key, $data);
+            if (!$status) {
+                throw new BackendException("Couldn't push to zset.");
+            }
+        } else {
+            // Note that we're ignoring the "new length" return value, cos I don't
+            // see how to make it useful.
+            $this->getConnection()->rpush($this->queue_name, $encoded_data);
+        }
     }
 
     /**
@@ -71,11 +105,35 @@ class Predis
      */
     public function pop()
     {
+        $data = null;
         $this->beforeGet();
         if (!$this->hasQueue()) {
             throw new BackendException("No queue specified.");
         }
-        $data = $this->getConnection()->lpop($this->queue_name);
+        if ($this->score_key) {
+            // Pop the first element by score.
+            // Adapted from https://github.com/nrk/predis/blob/v1.0/examples/transaction_using_cas.php
+            $queue = $this->queue_name;
+            $options = array(
+                'cas' => true,
+                'watch' => $queue,
+                'retry' => 3,
+            );
+            $score_key = $this->score_key;
+            $this->getConnection()->transaction($options, function ($tx) use ($queue, $score_key, &$data) {
+                $values = $tx->zrange($queue, 0, 0);
+                if ($values) {
+                    $key = $values[0];
+                    $data = $tx->get($key);
+
+                    $tx->multi();
+                    $tx->zrem($queue, $key);
+                    $tx->del($key);
+                }
+            });
+        } else {
+            $data = $this->getConnection()->lpop($this->queue_name);
+        }
         if (!$data) {
             return null;
         }
@@ -111,21 +169,23 @@ class Predis
     /**
      * @param  string              $key
      * @param  array|string        $data
-     * @return boolean
      * @throws \PHPQueue\Exception
      */
     public function set($key, $data)
     {
-        if (empty($key) && !is_string($key)) {
+        if (!$key || !is_string($key)) {
             throw new BackendException("Key is invalid.");
         }
-        if (empty($data)) {
+        if (!$data) {
             throw new BackendException("No data.");
         }
         $this->beforeAdd();
         try {
             $status = false;
-            if (is_array($data)) {
+            if ($this->score_key) {
+                $status = $this->addToSortedSet($key, $data);
+            } elseif (is_array($data)) {
+                // FIXME: Assert
                 $status = $this->getConnection()->hmset($key, $data);
             } elseif (is_string($data) || is_numeric($data)) {
                 $status = $this->getConnection()->set($key, $data);
@@ -136,6 +196,25 @@ class Predis
         } catch (\Exception $ex) {
             throw new BackendException($ex->getMessage(), $ex->getCode());
         }
+    }
+
+    protected function addToSortedSet($key, $data)
+    {
+        $queue = $this->queue_name;
+        $options = array(
+            'cas' => true,
+            'watch' => $queue,
+            'retry' => 3,
+        );
+        $score = $data[$this->score_key];
+        $encoded_data = json_encode($data);
+        $status = false;
+        $this->getConnection()->transaction($options, function ($tx) use ($queue, $key, $score, $encoded_data, &$status) {
+            $tx->multi();
+            $tx->zadd($this->queue_name, $score, $key);
+            $status = $tx->set($key, $encoded_data);
+        });
+        return $status;
     }
 
     /** @deprecated */
@@ -159,6 +238,10 @@ class Predis
             return null;
         }
         $this->beforeGet($key);
+        if ($this->score_key) {
+            $data = $this->getConnection()->get($key);
+            return json_decode($data, true);
+        }
         $type = $this->getConnection()->type($key);
         switch ($type) {
             case self::TYPE_STRING:
@@ -193,7 +276,17 @@ class Predis
     public function clear($key)
     {
         $this->beforeClear($key);
-        $num_removed = $this->getConnection()->del($key);
+
+        if ($this->score_key) {
+            $result = $this->getConnection()->pipeline()
+                ->zrem($this->queue_name, $key)
+                ->del($key)
+                ->execute();
+
+            $num_removed = $result[1];
+        } else {
+            $num_removed = $this->getConnection()->del($key);
+        }
 
         $this->afterClearRelease();
 

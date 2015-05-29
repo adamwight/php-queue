@@ -54,6 +54,7 @@ class Predis
         }
         if (!empty($options['score_key'])) {
             $this->score_key = $options['score_key'];
+            $this->redis_options['prefix'] = $this->queue_name . ':';
         }
         if (!empty($options['correlation_key'])) {
             $this->correlation_key = $options['correlation_key'];
@@ -117,21 +118,20 @@ class Predis
         if ($this->score_key) {
             // Pop the first element by score.
             // Adapted from https://github.com/nrk/predis/blob/v1.0/examples/transaction_using_cas.php
-            $queue = $this->queue_name;
             $options = array(
                 'cas' => true,
-                'watch' => $queue,
+                'watch' => 'fifo',
                 'retry' => 3,
             );
             $score_key = $this->score_key;
-            $this->getConnection()->transaction($options, function ($tx) use ($queue, $score_key, &$data) {
-                $values = $tx->zrange($queue, 0, 0);
+            $this->getConnection()->transaction($options, function ($tx) use ($score_key, &$data) {
+                $values = $tx->zrange('fifo', 0, 0);
                 if ($values) {
                     $key = $values[0];
                     $data = $tx->get($key);
 
                     $tx->multi();
-                    $tx->zrem($queue, $key);
+                    $tx->zrem('fifo', $key);
                     $tx->del($key);
                 }
             });
@@ -208,19 +208,18 @@ class Predis
 
     protected function addToSortedSet($key, $data)
     {
-        $queue = $this->queue_name;
         $options = array(
             'cas' => true,
-            'watch' => $queue,
+            'watch' => 'fifo',
             'retry' => 3,
         );
         $score = $data[$this->score_key];
         $encoded_data = json_encode($data);
         $status = false;
         $expiry = $this->expiry;
-        $this->getConnection()->transaction($options, function ($tx) use ($queue, $key, $score, $encoded_data, $expiry, &$status) {
+        $this->getConnection()->transaction($options, function ($tx) use ($key, $score, $encoded_data, $expiry, &$status) {
             $tx->multi();
-            $tx->zadd($this->queue_name, $score, $key);
+            $tx->zadd('fifo', $score, $key);
             if ($expiry) {
                 $status = $this->getConnection()->setex($key, $encoded_data, $expiry);
             } else {
@@ -292,7 +291,7 @@ class Predis
 
         if ($this->score_key) {
             $result = $this->getConnection()->pipeline()
-                ->zrem($this->queue_name, $key)
+                ->zrem('fifo', $key)
                 ->del($key)
                 ->execute();
 

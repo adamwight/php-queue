@@ -30,6 +30,8 @@ class Predis
     const TYPE_SET='set';
     const TYPE_NONE='none';
 
+    const FIFO_INDEX = 'fifo';
+
     public $servers;
     public $redis_options = array();
     public $queue_name;
@@ -120,18 +122,18 @@ class Predis
             // Adapted from https://github.com/nrk/predis/blob/v1.0/examples/transaction_using_cas.php
             $options = array(
                 'cas' => true,
-                'watch' => 'fifo',
+                'watch' => self::FIFO_INDEX,
                 'retry' => 3,
             );
             $score_key = $this->score_key;
             $this->getConnection()->transaction($options, function ($tx) use ($score_key, &$data) {
-                $values = $tx->zrange('fifo', 0, 0);
+                $values = $tx->zrange(self::FIFO_INDEX, 0, 0);
                 if ($values) {
                     $key = $values[0];
                     $data = $tx->get($key);
 
                     $tx->multi();
-                    $tx->zrem('fifo', $key);
+                    $tx->zrem(self::FIFO_INDEX, $key);
                     $tx->del($key);
                 }
             });
@@ -210,7 +212,7 @@ class Predis
     {
         $options = array(
             'cas' => true,
-            'watch' => 'fifo',
+            'watch' => self::FIFO_INDEX,
             'retry' => 3,
         );
         $score = $data[$this->score_key];
@@ -219,7 +221,7 @@ class Predis
         $expiry = $this->expiry;
         $this->getConnection()->transaction($options, function ($tx) use ($key, $score, $encoded_data, $expiry, &$status) {
             $tx->multi();
-            $tx->zadd('fifo', $score, $key);
+            $tx->zadd(self::FIFO_INDEX, $score, $key);
             if ($expiry) {
                 $status = $this->getConnection()->setex($key, $encoded_data, $expiry);
             } else {
@@ -291,7 +293,7 @@ class Predis
 
         if ($this->score_key) {
             $result = $this->getConnection()->pipeline()
-                ->zrem('fifo', $key)
+                ->zrem(self::FIFO_INDEX, $key)
                 ->del($key)
                 ->execute();
 

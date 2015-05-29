@@ -33,6 +33,7 @@ class Predis
     public $servers;
     public $redis_options = array();
     public $queue_name;
+    public $expiry;
     public $score_key;
     public $correlation_key;
 
@@ -47,6 +48,9 @@ class Predis
         }
         if (!empty($options['queue'])) {
             $this->queue_name = $options['queue'];
+        }
+        if (!empty($options['expiry'])) {
+            $this->expiry = $options['expiry'];
         }
         if (!empty($options['score_key'])) {
             $this->score_key = $options['score_key'];
@@ -188,7 +192,11 @@ class Predis
                 // FIXME: Assert
                 $status = $this->getConnection()->hmset($key, $data);
             } elseif (is_string($data) || is_numeric($data)) {
-                $status = $this->getConnection()->set($key, $data);
+                if ($this->expiry) {
+                    $status = $this->getConnection()->setex($key, $data, $this->expiry);
+                } else {
+                    $status = $this->getConnection()->set($key, $data);
+                }
             }
             if (!$status) {
                 throw new BackendException("Unable to save data.");
@@ -209,10 +217,15 @@ class Predis
         $score = $data[$this->score_key];
         $encoded_data = json_encode($data);
         $status = false;
-        $this->getConnection()->transaction($options, function ($tx) use ($queue, $key, $score, $encoded_data, &$status) {
+        $expiry = $this->expiry;
+        $this->getConnection()->transaction($options, function ($tx) use ($queue, $key, $score, $encoded_data, $expiry, &$status) {
             $tx->multi();
             $tx->zadd($this->queue_name, $score, $key);
-            $status = $tx->set($key, $encoded_data);
+            if ($expiry) {
+                $status = $this->getConnection()->setex($key, $encoded_data, $expiry);
+            } else {
+                $status = $this->getConnection()->set($key, $encoded_data);
+            }
         });
         return $status;
     }

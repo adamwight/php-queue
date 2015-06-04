@@ -195,7 +195,7 @@ class Predis
                 $status = $this->getConnection()->hmset($key, $data);
             } elseif (is_string($data) || is_numeric($data)) {
                 if ($this->expiry) {
-                    $status = $this->getConnection()->setex($key, $data, $this->expiry);
+                    $status = $this->getConnection()->setex($key, $this->expiry, $data);
                 } else {
                     $status = $this->getConnection()->set($key, $data);
                 }
@@ -223,9 +223,9 @@ class Predis
             $tx->multi();
             $tx->zadd(self::FIFO_INDEX, $score, $key);
             if ($expiry) {
-                $status = $this->getConnection()->setex($key, $encoded_data, $expiry);
+                $status = $tx->setex($key, $expiry, $encoded_data);
             } else {
-                $status = $this->getConnection()->set($key, $encoded_data);
+                $status = $tx->set($key, $encoded_data);
             }
         });
         return $status;

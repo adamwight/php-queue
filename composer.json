@@ -26,9 +26,11 @@
         "mrpoundsign/pheanstalk-5.3": "dev-master",
         "aws/aws-sdk-php": "dev-master",
         "amazonwebservices/aws-sdk-for-php": "dev-master",
+        "nmred/kafka-php": "0.1.*",
         "predis/predis": "1.*",
         "iron-io/iron_mq": "dev-master",
         "ext-memcache": "*",
+        "ext-rdkafka": "*",
         "microsoft/windowsazure": "dev-master"
     },
     "suggest": {
